@@ -5,6 +5,7 @@ import sys
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+import pandas as pd  # 新增：用于读取Excel文件
 
 # ===================== 全局配置(可直接修改。无需改代码逻辑) =====================
 # 【核心可配置项】
@@ -17,7 +18,7 @@ RETRY_INTERVAL = 2
 
 # 调整列宽适配内容。让表头和数据视觉对齐,不要乱动
 COL_WIDTHS = {
-    "code": 14,        # 代码列:18字符
+    "code": 14,        # 代码列:14字符
     "name": 12,        # 名称列:12字符(适配股票名长度)
     "current": 12,     # 当前价列:12字符
     "open": 12,        # 开盘价列:12字符
@@ -26,28 +27,18 @@ COL_WIDTHS = {
     "change": 12       # 涨跌幅列:12字符
 }
 COL_HEADER_WIDTHS = {
-    "code": 12,        # 代码列:18字符
-    "name": 14,        # 名称列:18字符(适配股票名长度)
-    "current": 9,     # 当前价列:12字符
-    "open": 9,        # 开盘价列:12字符
-    "high": 9,        # 最高价列:12字符
-    "low": 9,         # 最低价列:12字符
-    "change": 9       # 涨跌幅列:12字符
+    "code": 12,        # 代码列:12字符
+    "name": 14,        # 名称列:14字符(适配股票名长度)
+    "current": 9,      # 当前价列:9字符
+    "open": 9,         # 开盘价列:9字符
+    "high": 9,         # 最高价列:9字符
+    "low": 9,          # 最低价列:9字符
+    "change": 9        # 涨跌幅列:9字符
 }
-# 【股票配置】
-# 需监控的10只A股代码(格式:股票代码+市场。sh=沪市/科创板。sz=深市/创业板)
-STOCK_CODES = [
-    "sh600699",  # 均胜电子
-    "sh600783",  # 鲁信创投
-    "sz002156",  # 通富微电
-    "sz002957",  # 科瑞技术
-    "sz300058",  # 蓝色光标
-    "sz300115",  # 长盈精密
-]
 
 # 【其他配置】
-# 持仓信息(首次运行会引导手动输入。也可直接在这里配置)
-HOLDINGS = {}
+# Excel配置文件路径
+CONFIG_EXCEL_PATH = "config.xlsx"
 # 股票数据接口
 STOCK_API = "https://hq.sinajs.cn/list={}"
 # 是否清屏(True=清屏。False=保留历史数据)
@@ -63,7 +54,7 @@ def check_environment() -> None:
         raise RuntimeError("❌ Python版本需≥3.7。请升级后重试!")
 
     # 2. 检查依赖包
-    required_packages = ["requests"]
+    required_packages = ["requests", "pandas", "openpyxl"]  # 新增：pandas和openpyxl
     missing_packages = []
     for pkg in required_packages:
         try:
@@ -77,7 +68,11 @@ def check_environment() -> None:
             f"请执行:pip install {' '.join(missing_packages)}"
         )
 
-    # 3. 检查网络连接
+    # 3. 检查配置文件是否存在
+    if not os.path.exists(CONFIG_EXCEL_PATH):
+        raise FileNotFoundError(f"❌ 配置文件{CONFIG_EXCEL_PATH}不存在!请确认文件路径。")
+
+    # 4. 检查网络连接
     retry_count = 0
     while retry_count < REQUEST_RETRY_TIMES:
         try:
@@ -92,6 +87,50 @@ def check_environment() -> None:
         raise ConnectionError("❌ 网络连接失败。请检查网络后重试!")
 
     print("✅ 环境检查通过!")
+
+# ===================== 加载Excel配置文件 =====================
+def load_holdings_from_excel(file_path: str) -> (List[str], Dict[str, Dict]):
+    """
+    从Excel配置文件加载股票代码和持仓信息
+    :param file_path: Excel文件路径
+    :return: (股票代码列表, 持仓字典)
+    """
+    try:
+        # 读取Excel文件（openpyxl为xlsx格式引擎）
+        df = pd.read_excel(file_path, engine="openpyxl")
+
+        # 校验必要列是否存在
+        required_columns = ["股票代码", "股票名称", "成本", "持仓数量"]
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"❌ Excel文件缺少必要列：{col}")
+
+        # 清理空值数据
+        df = df.dropna(subset=["股票代码", "成本", "持仓数量"])
+
+        # 转换数据类型
+        df["成本"] = df["成本"].astype(float)
+        df["持仓数量"] = df["持仓数量"].astype(int)
+
+        # 构建股票代码列表和持仓字典
+        stock_codes = df["股票代码"].tolist()
+        holdings = {}
+        for _, row in df.iterrows():
+            code = row["股票代码"]
+            holdings[code] = {
+                "cost_price": row["成本"],
+                "quantity": row["持仓数量"],
+                "name": row["股票名称"]  # 额外存储股票名称，备用
+            }
+
+        if not stock_codes:
+            raise ValueError("❌ Excel配置文件中无有效股票数据!")
+
+        print(f"✅ 成功加载{len(stock_codes)}只股票的配置信息")
+        return stock_codes, holdings
+
+    except Exception as e:
+        raise RuntimeError(f"❌ 加载Excel配置文件失败：{str(e)}")
 
 # ===================== 股票数据获取(带自动重试) =====================
 def get_stock_data(stock_codes: List[str]) -> Dict[str, Dict]:
@@ -181,55 +220,6 @@ def get_stock_data(stock_codes: List[str]) -> Dict[str, Dict]:
     return {}
 
 # ===================== 持仓盈亏计算 =====================
-def input_holdings() -> Dict[str, Dict]:
-    """引导用户手动输入持仓信息"""
-    print("\n📝 请输入持仓信息(输入完成后按回车确认。留空则跳过)")
-    holdings = {}
-
-    while True:
-        # 显示可选的股票代码
-        print(f"\n可选股票代码:{', '.join(STOCK_CODES)}")
-        code = input("请输入持仓股票代码(如sh600000):").strip()
-
-        if not code:
-            break
-
-        if code not in STOCK_CODES:
-            print(f"❌ 股票代码{code}不在监控列表中。请重新输入!")
-            continue
-
-        # 输入成本价
-        while True:
-            cost_input = input(f"请输入{code}的成本价:").strip()
-            try:
-                cost_price = float(cost_input)
-                if cost_price <= 0:
-                    print("❌ 成本价需大于0。请重新输入!")
-                    continue
-                break
-            except ValueError:
-                print("❌ 成本价必须是数字。请重新输入!")
-
-        # 输入持仓数量
-        while True:
-            qty_input = input(f"请输入{code}的持仓数量:").strip()
-            try:
-                quantity = int(qty_input)
-                if quantity <= 0:
-                    print("❌ 持仓数量需大于0。请重新输入!")
-                    continue
-                break
-            except ValueError:
-                print("❌ 持仓数量必须是整数。请重新输入!")
-
-        holdings[code] = {
-            "cost_price": cost_price,
-            "quantity": quantity
-        }
-        print(f"✅ 已添加持仓:{code} - 成本价{cost_price}。数量{quantity}")
-
-    return holdings
-
 def calculate_profit_loss(stock_data: Dict[str, Dict], holdings: Dict[str, Dict]) -> Dict[str, Dict]:
     """计算持仓盈亏"""
     profit_data = {}
@@ -353,7 +343,7 @@ def print_stock_report(stock_data: Dict[str, Dict], profit_data: Dict[str, Dict]
 
     # 底部信息
     next_time = (datetime.now() + timedelta(seconds=REPORT_INTERVAL)).strftime("%H:%M:%S")
-    tip = f"⌛ 下次播报时间:{next_time} | 已收盘 | 间隔 {REPORT_INTERVAL}秒"
+    tip = f"⌛ 下次播报时间:{next_time} | 间隔 {REPORT_INTERVAL}秒"
     print(f"\n{separator}")
     print(left_align_fixed(tip, 180))
     print(separator)
@@ -364,11 +354,8 @@ def main():
         # 1. 环境检查
         check_environment()
 
-        # 2. 引导输入持仓信息
-        if not HOLDINGS:
-            HOLDINGS.update(input_holdings())
-            if not HOLDINGS:
-                print("\n⚠️  未配置持仓信息。仅显示股票实时数据!")
+        # 2. 从Excel加载股票代码和持仓信息（替代手动输入）
+        STOCK_CODES, HOLDINGS = load_holdings_from_excel(CONFIG_EXCEL_PATH)
 
         # 3. 循环获取数据并播报
         print(f"\n🚀 股票实时播报程序已启动。每{REPORT_INTERVAL}秒播报一次(按Ctrl+C退出)...")
