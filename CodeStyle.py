@@ -4,7 +4,7 @@ import shutil
 
 def remove_all_trailing_spaces(file_path, backup_suffix='.bak'):
     """
-    彻底删除文件中所有行尾的空格/制表符（包括空行中的），兼容Windows(\r\n)和Linux(\n)换行
+    彻底删除文件中所有行尾的空格/制表符（包括空行中的),兼容Windows(\r\n)和Linux(\n)换行
     """
     # 1. 备份原文件
     if not os.path.isfile(file_path):
