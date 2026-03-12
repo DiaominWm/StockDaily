@@ -176,7 +176,7 @@ def get_stock_data(stock_codes: List[str]) -> Dict[str, Dict]:
                     # 适配最新字段索引(修正核心:正确提取关键字段)
                     name = values[0] if values[0] else "未知股票"
                     open_price = float(values[1]) if values[1] else 0.0  # 开盘价
-                    pre_close = float(values[2]) if values[2] else 0.0  # 昨收盘价(涨跌幅基准)
+                    pre_close = float(values[2]) if values[2] else 0.0  # 昨收盘价(当日盈亏基准)
                     current_price = float(values[3]) if values[3] else 0.0  # 当前价
                     high_price = float(values[4]) if values[4] else 0.0  # 最高价
                     low_price = float(values[5]) if values[5] else 0.0  # 最低价
@@ -197,6 +197,7 @@ def get_stock_data(stock_codes: List[str]) -> Dict[str, Dict]:
                         "low_price": low_price,
                         "change_percent": round(change_percent, 2),  # 保留2位小数
                         "change_price": round(change_price, 2),
+                        "pre_close": pre_close,  # 新增：昨日收盘价(当日盈亏计算用)
                         "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
                 except (ValueError, IndexError) as e:
@@ -219,9 +220,9 @@ def get_stock_data(stock_codes: List[str]) -> Dict[str, Dict]:
     # 所有重试都失败
     return {}
 
-# ===================== 持仓盈亏计算 =====================
+# ===================== 持仓总盈亏计算 =====================
 def calculate_profit_loss(stock_data: Dict[str, Dict], holdings: Dict[str, Dict]) -> Dict[str, Dict]:
-    """计算持仓盈亏"""
+    """计算持仓总盈亏(基于成本价)"""
     profit_data = {}
     for code, hold in holdings.items():
         if code not in stock_data:
@@ -254,7 +255,38 @@ def calculate_profit_loss(stock_data: Dict[str, Dict], holdings: Dict[str, Dict]
 
     return profit_data
 
-# ===================== 终端播报(修改盈亏分析为键值对格式) =====================
+# ===================== 当日盈亏计算 =====================
+def calculate_daily_profit(stock_data: Dict[str, Dict], holdings: Dict[str, Dict]) -> Dict[str, Dict]:
+    """计算当日盈亏(基于昨日收盘价)"""
+    daily_profit_data = {}
+    for code, hold in holdings.items():
+        if code not in stock_data:
+            print(f"⚠️  未获取到{code}的实时数据。跳过当日盈亏计算")
+            continue
+
+        current_price = stock_data[code]["current_price"]
+        pre_close = stock_data[code]["pre_close"]
+        quantity = hold["quantity"]
+
+        # 当日盈亏计算：(当前价 - 昨日收盘价) × 持仓数量
+        if pre_close != 0:
+            daily_profit_amount = (current_price - pre_close) * quantity
+            daily_profit_percent = ((current_price - pre_close) / pre_close) * 100
+        else:
+            daily_profit_amount = 0.0
+            daily_profit_percent = 0.0
+
+        daily_profit_data[code] = {
+            "pre_close": pre_close,
+            "current_price": current_price,
+            "quantity": quantity,
+            "daily_profit_amount": round(daily_profit_amount, 2),
+            "daily_profit_percent": round(daily_profit_percent, 2)
+        }
+
+    return daily_profit_data
+
+# ===================== 终端播报(保留总盈亏+新增当日盈亏统计) =====================
 def left_align_fixed(content: str, width: int) -> str:
     """
     强制左对齐:内容从列的第一个字符开始。不足补空格到固定宽度
@@ -267,7 +299,8 @@ def left_align_fixed(content: str, width: int) -> str:
     # ljust:内容左对齐。右侧补空格。保证列宽固定
     return content_str.ljust(width)
 
-def print_stock_report(stock_data: Dict[str, Dict], profit_data: Dict[str, Dict]) -> None:
+def print_stock_report(stock_data: Dict[str, Dict], profit_data: Dict[str, Dict],
+                       daily_profit_data: Dict[str, Dict], daily_max_profit: float, daily_max_loss: float) -> None:
     if CLEAR_SCREEN:
         os.system("clear" if os.name == "posix" else "cls")
 
@@ -277,12 +310,12 @@ def print_stock_report(stock_data: Dict[str, Dict], profit_data: Dict[str, Dict]
     print(f"📈 股票实时播报 | 更新时间:{update_time}".ljust(120))
     print(separator)
 
-    # ================== 股票实时数据(去掉分隔线+精准对齐)==================
+    # ================== 股票实时数据 ==================
     print("\n📊 股票实时数据:")
 
-    # 构建表头(竖线分隔。每列左对齐。宽度固定)
+    # 构建表头
     header = (
-        f"| {'代    码':<{COL_HEADER_WIDTHS['code'] - 2}} "  # -2是预留竖线和空格
+        f"| {'代    码':<{COL_HEADER_WIDTHS['code'] - 2}} "
         f"| {'名    称':<{COL_HEADER_WIDTHS['name'] - 2}} "
         f"| {'当前价':<{COL_HEADER_WIDTHS['current'] - 2}} "
         f"| {'开盘价':<{COL_HEADER_WIDTHS['open'] - 2}} "
@@ -290,12 +323,10 @@ def print_stock_report(stock_data: Dict[str, Dict], profit_data: Dict[str, Dict]
         f"| {'最低价':<{COL_HEADER_WIDTHS['low'] - 2}} "
         f"| {'涨跌幅(%)':<{COL_HEADER_WIDTHS['change'] - 2}} |"
     )
-    # 只打印表头(删除分隔线)
     print(header)
 
-    # 打印数据行(和表头列宽1:1匹配)
+    # 打印数据行
     for code, data in stock_data.items():
-        # 提前计算各数值的字符串(避免引号冲突)
         current_price_str = f"{data['current_price']:.2f}"
         open_price_str = f"{data['open_price']:.2f}"
         high_price_str = f"{data['high_price']:.2f}"
@@ -303,25 +334,23 @@ def print_stock_report(stock_data: Dict[str, Dict], profit_data: Dict[str, Dict]
         change_percent_str = f"{data['change_percent']:+.2f}"
 
         row = (
-            f"| {code:<{COL_WIDTHS['code'] - 2}} "  # 代码列:左对齐。占16字符
-            f"| {data['name']:<{COL_WIDTHS['name'] - 2}} "  # 名称列:左对齐。占16字符
-            f"| {current_price_str:<{COL_WIDTHS['current'] - 2}} "  # 当前价:左对齐
-            f"| {open_price_str:<{COL_WIDTHS['open'] - 2}} "  # 开盘价:左对齐
-            f"| {high_price_str:<{COL_WIDTHS['high'] - 2}} "  # 最高价:左对齐
-            f"| {low_price_str:<{COL_WIDTHS['low'] - 2}} "  # 最低价:左对齐
-            f"| {change_percent_str:<{COL_WIDTHS['change'] - 2}} |"  # 涨跌幅:左对齐
+            f"| {code:<{COL_WIDTHS['code'] - 2}} "
+            f"| {data['name']:<{COL_WIDTHS['name'] - 2}} "
+            f"| {current_price_str:<{COL_WIDTHS['current'] - 2}} "
+            f"| {open_price_str:<{COL_WIDTHS['open'] - 2}} "
+            f"| {high_price_str:<{COL_WIDTHS['high'] - 2}} "
+            f"| {low_price_str:<{COL_WIDTHS['low'] - 2}} "
+            f"| {change_percent_str:<{COL_WIDTHS['change'] - 2}} |"
         )
         print(row)
 
-    # ================== 持仓盈亏分析(改为键值对格式)==================
+    # ================== 持仓总盈亏分析 ==================
     if profit_data:
-        print("\n💰 持仓盈亏分析:")
-        print("-" * 120)  # 分隔线
+        print("\n💰 持仓总盈亏分析:")
+        print("-" * 120)
 
         total_profit = 0.0
-        # 逐行输出每个股票的盈亏信息(键值对格式)
         for code, profit in profit_data.items():
-            # 构建键值对字符串。每个字段之间保留固定空格。排版整洁
             stock_name = stock_data.get(code, {}).get("name", "未知股票")
             profit_line = (
                 f"名称:{stock_name:<6}  "
@@ -338,8 +367,36 @@ def print_stock_report(stock_data: Dict[str, Dict], profit_data: Dict[str, Dict]
 
         # 总盈亏汇总
         print("-" * 120)
-        total_profit_line = f"📝 总盈亏:{total_profit:>+10.2f} 元"
+        total_profit_line = f"📝 持仓总盈亏:{total_profit:>+10.2f} 元"
         print(total_profit_line)
+
+    # ================== 当日盈亏分析(新增) ==================
+    if daily_profit_data:
+        print("\n💰 当日盈亏分析:")
+        print("-" * 120)
+
+        total_daily_profit = 0.0
+        for code, profit in daily_profit_data.items():
+            stock_name = stock_data.get(code, {}).get("name", "未知股票")
+            profit_line = (
+                f"名称:{stock_name:<6}  "
+                f"昨日收盘价:{profit['pre_close']:<8.2f}  "
+                f"当前价:{profit['current_price']:<8.2f}  "
+                f"数量:{profit['quantity']:<4d}  "
+                f"当日盈亏:{profit['daily_profit_amount']:<+10.2f}  "
+                f"当日涨幅:{profit['daily_profit_percent']:<+8.2f}%"
+            )
+            print(profit_line)
+            total_daily_profit += profit["daily_profit_amount"]
+
+        # 当日盈亏+极值汇总
+        print("-" * 120)
+        daily_summary_line = (
+            f"📝 当日盈亏:{total_daily_profit:>+10.2f} 元 "
+            f" 当日最大盈利:{daily_max_profit:>+10.2f} 元 "
+            f" 当日最大亏损:{daily_max_loss:>+10.2f} 元"
+        )
+        print(daily_summary_line)
 
     # 底部信息
     next_time = (datetime.now() + timedelta(seconds=REPORT_INTERVAL)).strftime("%H:%M:%S")
@@ -354,13 +411,26 @@ def main():
         # 1. 环境检查
         check_environment()
 
-        # 2. 从Excel加载股票代码和持仓信息（替代手动输入）
+        # 2. 从Excel加载股票代码和持仓信息
         STOCK_CODES, HOLDINGS = load_holdings_from_excel(CONFIG_EXCEL_PATH)
+
+        # 初始化当日盈亏统计变量
+        today = datetime.now().date()
+        daily_max_profit = 0.0
+        daily_max_loss = 0.0
 
         # 3. 循环获取数据并播报
         print(f"\n🚀 股票实时播报程序已启动。每{REPORT_INTERVAL}秒播报一次(按Ctrl+C退出)...")
         while True:
             try:
+                # 每日重置检查
+                current_date = datetime.now().date()
+                if current_date != today:
+                    today = current_date
+                    daily_max_profit = 0.0
+                    daily_max_loss = 0.0
+                    print(f"\n📅 已跨至{today.strftime('%Y-%m-%d')}，当日盈亏统计已重置！")
+
                 # 获取股票数据
                 stock_data = get_stock_data(STOCK_CODES)
                 if not stock_data:
@@ -368,11 +438,24 @@ def main():
                     time.sleep(REPORT_INTERVAL)
                     continue
 
-                # 计算盈亏
+                # 计算持仓总盈亏（保留原有统计）
                 profit_data = calculate_profit_loss(stock_data, HOLDINGS)
+                # 计算当日盈亏（新增统计）
+                daily_profit_data = calculate_daily_profit(stock_data, HOLDINGS)
 
-                # 打印播报
-                print_stock_report(stock_data, profit_data)
+                # 计算总盈亏
+                total_profit = sum(profit["profit_amount"] for profit in profit_data.values()) if profit_data else 0.0
+                # 计算当日总盈亏
+                total_daily_profit = sum(profit["daily_profit_amount"] for profit in daily_profit_data.values()) if daily_profit_data else 0.0
+
+                # 更新当日最大盈利/亏损
+                if total_daily_profit > daily_max_profit:
+                    daily_max_profit = total_daily_profit
+                if total_daily_profit < daily_max_loss:
+                    daily_max_loss = total_daily_profit
+
+                # 打印播报（传入所有统计数据）
+                print_stock_report(stock_data, profit_data, daily_profit_data, daily_max_profit, daily_max_loss)
 
                 # 等待指定间隔
                 time.sleep(REPORT_INTERVAL)
@@ -382,7 +465,7 @@ def main():
                 sys.exit(0)
             except Exception as e:
                 print(f"\n❌ 单次播报异常:{str(e)},{REPORT_INTERVAL}秒后重试...")
-                time.sleep(REPORT_INTERVAL)
+                time.sleep(RETRY_INTERVAL)
 
     except Exception as e:
         print(f"\n💥 程序启动失败:{str(e)}")
