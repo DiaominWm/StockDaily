@@ -8,3 +8,7 @@ pyinstaller -F StockDaily.py
 
 # Run the executable file
 ./dist/StockDaily
+
+#########junshen#########
+source .venv/bin/activate
+python junshen.py
